@@ -1,0 +1,176 @@
+# ============================================================================
+# MrScraper Enterprise Price Monitor — GitHub Actions Workflow
+# ============================================================================
+#
+# This workflow runs the price monitoring pipeline on a schedule.
+# Think of this as equivalent to a GitLab CI pipeline with scheduled triggers.
+#
+# GitLab CI → GitHub Actions translation:
+#   .gitlab-ci.yml          →  .github/workflows/price-monitor.yml
+#   stages:                  →  jobs:
+#   script:                  →  steps: ... run:
+#   variables:               →  env:
+#   only: schedules          →  on: schedule:
+#   artifacts:               →  actions/upload-artifact
+#   cache:                   →  actions/cache
+#
+# HOW IT WORKS:
+#   1. Runs every 6 hours (configurable via cron)
+#   2. Downloads the previous price database (if it exists)
+#   3. Scrapes current prices from all configured retailers
+#   4. Stores new prices, detects changes, sends alerts
+#   5. Uploads the updated database as an artifact for the next run
+#   6. Writes a summary to the GitHub Actions UI
+#
+# SETUP REQUIRED:
+#   1. Go to your repo → Settings → Secrets and variables → Actions
+#   2. Add these repository secrets:
+#      - MRSCRAPER_API_TOKEN: Your MrScraper API token
+#      - MRSCRAPER_SCRAPER_ID: (recommended) UUID of your Listing Agent scraper
+#      - ALERT_WEBHOOK_URL: (optional) Slack/Discord webhook URL
+#
+# ============================================================================
+
+name: "🏷️ Price Monitor"
+
+# WHEN does this run?
+on:
+  # Scheduled runs (like GitLab CI schedules)
+  schedule:
+    # Every 6 hours: at minute 0 of hours 0, 6, 12, 18 (UTC)
+    # Cron syntax: minute hour day-of-month month day-of-week
+    - cron: "0 */6 * * *"
+
+  # Manual trigger (like GitLab's "Run pipeline" button)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (scrape but don't store)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      threshold:
+        description: "Alert threshold percentage"
+        required: false
+        default: "5.0"
+        type: string
+
+# Environment variables available to all jobs
+# (like GitLab CI 'variables:' at the top level)
+env:
+  PYTHON_VERSION: "3.11"
+  DB_DIR: "data"
+
+jobs:
+  # ========================================================================
+  # Job: scrape-and-monitor
+  # ========================================================================
+  scrape-and-monitor:
+    name: "Scrape Prices & Detect Changes"
+    runs-on: ubuntu-latest
+    # Timeout after 15 minutes (scraping can be slow)
+    timeout-minutes: 15
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1. Check out the repository code
+      # ------------------------------------------------------------------
+      - name: "📥 Checkout code"
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 2. Set up Python
+      # ------------------------------------------------------------------
+      - name: "🐍 Set up Python ${{ env.PYTHON_VERSION }}"
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # ------------------------------------------------------------------
+      # 3. Install dependencies
+      # ------------------------------------------------------------------
+      - name: "📦 Install dependencies"
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ------------------------------------------------------------------
+      # 4. Restore previous database from cache
+      #    This is the key trick: we persist the SQLite database between
+      #    workflow runs using GitHub Actions cache. Each run builds on
+      #    the price history from previous runs.
+      # ------------------------------------------------------------------
+      - name: "💾 Restore price database from cache"
+        uses: actions/cache@v4
+        with:
+          path: data/prices.db
+          # The key includes the date so we get a fresh cache daily
+          # but restore from the most recent cache if today's doesn't exist
+          key: price-db-${{ github.run_number }}
+          restore-keys: |
+            price-db-
+
+      # ------------------------------------------------------------------
+      # 5. Run the price monitoring pipeline
+      # ------------------------------------------------------------------
+      - name: "🏷️ Run price monitor pipeline"
+        env:
+          MRSCRAPER_API_TOKEN: ${{ secrets.MRSCRAPER_API_TOKEN }}
+          MRSCRAPER_SCRAPER_ID: ${{ secrets.MRSCRAPER_SCRAPER_ID }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+        run: |
+          # Determine flags from workflow_dispatch inputs
+          DRY_RUN_FLAG=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            DRY_RUN_FLAG="--dry-run"
+          fi
+
+          THRESHOLD="${{ github.event.inputs.threshold || '5.0' }}"
+
+          python -m src.pipeline $DRY_RUN_FLAG --threshold $THRESHOLD
+
+      # ------------------------------------------------------------------
+      # 6. Upload the database as a build artifact
+      #    This lets you download the price history DB from the Actions UI
+      # ------------------------------------------------------------------
+      - name: "📤 Upload price database"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: price-database-${{ github.run_number }}
+          path: data/prices.db
+          retention-days: 90
+
+      # ------------------------------------------------------------------
+      # 7. Upload any alert logs for debugging
+      # ------------------------------------------------------------------
+      - name: "📊 Generate run summary"
+        if: always()
+        run: |
+          echo "## 🏷️ Price Monitor Run Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Run:** #${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Time:** $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Show database stats if DB exists
+          if [ -f "data/prices.db" ]; then
+            echo "### Database Stats" >> $GITHUB_STEP_SUMMARY
+            python -c "
+          from src.database import get_summary_stats
+          stats = get_summary_stats()
+          print(f'- **Total records:** {stats[\"total_records\"]}')
+          print(f'- **Unique products:** {stats[\"unique_products\"]}')
+          print(f'- **Retailers tracked:** {stats[\"retailers_tracked\"]}')
+          print(f'- **Alerts (24h):** {stats[\"alerts_24h\"]}')
+          " >> $GITHUB_STEP_SUMMARY
+          fi

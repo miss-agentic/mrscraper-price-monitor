@@ -1,0 +1,31 @@
+{
+  "retailers": [
+    {
+      "retailer": "Amazon",
+      "url": "https://www.amazon.com/Beats-Powerbeats-Wireless-Bluetooth-Earbuds/dp/B0DT2344N3",
+      "category": "headphones",
+      "scraper_id": "45519a23-9109-4692-a13e-5d9e4695790b"
+    },
+    {
+      "retailer": "BestBuy",
+      "url": "https://www.bestbuy.com/product/beats-powerbeats-pro-2-true-wireless-active-noise-canceling-earbuds-jet-black/JJGCQ3FZLV",
+      "category": "headphones",
+      "scraper_id": "3821c1cf-ea2b-4476-a7be-345d77502150"
+    },
+    {
+      "retailer": "Walmart",
+      "url": "https://www.walmart.com/ip/Beats-Powerbeats-Pro-2-High-Performance-Earbuds-Jet-Black/15075506141",
+      "category": "headphones",
+      "scraper_id": "60c9c036-226b-4ba2-9ce8-1c764c598a70"
+    }
+  ],
+  "scraping": {
+    "max_retry": 3,
+    "max_pages": 1,
+    "timeout": 300,
+    "stream": false
+  },
+  "alerts": {
+    "threshold_pct": 5.0
+  }
+}

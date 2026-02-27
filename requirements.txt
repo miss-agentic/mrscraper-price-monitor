@@ -1,0 +1,2 @@
+# Core dependencies for the price monitoring pipeline
+requests>=2.31.0,<3.0.0
